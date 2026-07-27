@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.h0ek.DeskEntry</id>
+  <name>DeskEntry</name>
+  <summary>Manage Linux desktop entries</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>DeskEntry is a GNOME-first editor and manager for freedesktop desktop entry files.</p>
+  </description>
+  <launchable type="desktop-id">io.github.h0ek.DeskEntry.desktop</launchable>
+  <icon type="stock">io.github.h0ek.DeskEntry</icon>
+  <url type="homepage">https://github.com/h0ek/deskentry</url>
+  <releases>
+    <release version="1.0.0" date="2026-07-27"/>
+    <release version="0.5.0" date="2026-07-27"/>
+    <release version="0.4.1" date="2026-07-27"/>
+    <release version="0.4.0" date="2026-07-27"/>
+    <release version="0.3.0" date="2026-07-27"/>
+    <release version="0.2.1" date="2026-07-26"/>
+    <release version="0.2.0" date="2026-07-26"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=DeskEntry
+Comment=Manage Linux desktop entries
+Exec=deskentry
+Icon=io.github.h0ek.DeskEntry
+Terminal=false
+Categories=Utility;Settings;
+Keywords=desktop;launcher;application;GNOME;

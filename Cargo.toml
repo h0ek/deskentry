@@ -1,0 +1,43 @@
+[package]
+name = "deskentry"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.94.1"
+description = "GNOME-first desktop entry manager"
+license = "MIT"
+repository = "https://github.com/h0ek/deskentry"
+
+[dependencies.gtk]
+package = "gtk4"
+version = "0.11.4"
+features = ["v4_10"]
+
+[dependencies.adw]
+package = "libadwaita"
+version = "0.9.2"
+features = ["v1_5"]
+
+[dependencies.gio-unix]
+version = "0.22.8"
+
+[build-dependencies]
+glib-build-tools = "0.22.8"
+
+[lints.rust]
+warnings = { level = "deny", priority = -1 }
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+overflow-checks = true
+strip = "symbols"

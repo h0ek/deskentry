@@ -1,0 +1,13 @@
+/target/
+/dist/
+
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+.DS_Store
+
+core
+core.*
