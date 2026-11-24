@@ -395,6 +395,81 @@ impl DesktopDocument {
         Ok(())
     }
 
+    pub fn replace_actions_and_extra(
+        &mut self,
+        actions: &[DesktopAction],
+        values: &[ExtraKeyValue],
+    ) -> Result<(), String> {
+        let old_ids = self.action_ids();
+        let mut remapped = Vec::with_capacity(values.len());
+        for value in values {
+            let mut value = value.clone();
+            if let Some(old_id) = old_ids
+                .iter()
+                .find(|id| action_group_name(id) == value.group.trim())
+            {
+                let Some(action) = actions
+                    .iter()
+                    .find(|action| action.original_id.as_ref() == Some(old_id))
+                else {
+                    continue;
+                };
+                value.group = action_group_name(&action.id);
+            }
+            remapped.push(value);
+        }
+        let mut updated = self.clone();
+        updated.replace_desktop_actions(actions)?;
+        updated.replace_extra_key_values(&remapped)?;
+        *self = updated;
+        Ok(())
+    }
+
+    pub fn prune_type_specific_fields(&mut self) {
+        match self.get_main("Type") {
+            Some("Application") => self.set_main("URL", None),
+            Some("Link" | "Directory") => {
+                let is_directory = self.get_main("Type") == Some("Directory");
+                for key in [
+                    "Exec",
+                    "TryExec",
+                    "Path",
+                    "Terminal",
+                    "Actions",
+                    "MimeType",
+                    "Categories",
+                    "Keywords",
+                    "StartupNotify",
+                    "StartupWMClass",
+                    "DBusActivatable",
+                    "PrefersNonDefaultGPU",
+                    "SingleMainWindow",
+                ] {
+                    self.set_main(key, None);
+                }
+                if is_directory {
+                    self.set_main("URL", None);
+                }
+                let mut group = String::new();
+                self.lines.retain(|line| {
+                    if let Line::Section(name) = line {
+                        group.clone_from(name);
+                    }
+                    if group.starts_with(ACTION_GROUP_PREFIX) {
+                        return false;
+                    }
+                    if group == "Desktop Entry"
+                        && let Line::KeyValue { key, .. } = line
+                    {
+                        return split_localized_key(key).is_none_or(|(base, _)| base != "Keywords");
+                    }
+                    true
+                });
+            }
+            _ => {}
+        }
+    }
+
     pub fn replace_desktop_actions(&mut self, actions: &[DesktopAction]) -> Result<(), String> {
         validate_actions(actions)?;
 
@@ -1024,6 +1099,88 @@ mod tests {
         assert!(output.contains("Value=keep"));
         assert!(!output.contains("[Desktop Action Open]"));
         Ok(())
+    }
+
+    #[test]
+    fn action_rename_and_delete_remap_extra_keys() -> Result<(), String> {
+        let input = "[Desktop Entry]\nType=Application\nName=Test\nActions=Open;Remove;\n[Desktop Action Open]\nName=Open\nExec=test\nX-Vendor=keep\n[Desktop Action Remove]\nName=Remove\nExec=test\nX-Vendor=drop\n[Vendor Group]\nKey=keep\n";
+        let mut document = DesktopDocument::parse(input);
+        let mut actions = document.desktop_actions();
+        actions.retain(|action| action.id == "Open");
+        if let Some(action) = actions.first_mut() {
+            action.id = "Launch".to_string();
+        }
+        let mut values = document.extra_key_values();
+        for value in &mut values {
+            if value.group == "Desktop Action Open" {
+                value.value = "edited".to_string();
+            }
+        }
+        document.replace_actions_and_extra(&actions, &values)?;
+        assert_eq!(document.get_main("Actions"), Some("Launch;"));
+        assert_eq!(
+            document.get_group_value("Desktop Action Launch", "X-Vendor"),
+            Some("edited")
+        );
+        assert_eq!(
+            document.get_group_value("Vendor Group", "Key"),
+            Some("keep")
+        );
+        assert!(!document.serialize().contains("[Desktop Action Open]"));
+        assert!(!document.serialize().contains("[Desktop Action Remove]"));
+        Ok(())
+    }
+
+    #[test]
+    fn swapped_actions_keep_their_own_extra_keys() -> Result<(), String> {
+        let input = "[Desktop Entry]\nType=Application\nName=Test\nActions=A;B;\n[Desktop Action A]\nName=First\nExec=test\nX-Key=one\n[Desktop Action B]\nName=Second\nExec=test\nX-Key=two\n";
+        let mut document = DesktopDocument::parse(input);
+        let mut actions = document.desktop_actions();
+        for action in &mut actions {
+            action.id = if action.id == "A" { "B" } else { "A" }.to_string();
+        }
+        let values = document.extra_key_values();
+        document.replace_actions_and_extra(&actions, &values)?;
+        assert_eq!(
+            document.get_group_value("Desktop Action B", "X-Key"),
+            Some("one")
+        );
+        assert_eq!(
+            document.get_group_value("Desktop Action A", "X-Key"),
+            Some("two")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn type_changes_remove_incompatible_fields() {
+        let input = "[Desktop Entry]\nType=Link\nName=Test\nExec=test\nURL=https://example.org\nKeywords=test;\nKeywords[pl]=test;\nStartupWMClass=test\nTerminal=false\nActions=Open;\nX-Vendor=keep\n[Desktop Action Open]\nName=Open\nExec=test\nX-Key=drop\n[Vendor Group]\nKey=keep\n";
+        let mut document = DesktopDocument::parse(input);
+        document.prune_type_specific_fields();
+        for key in [
+            "Exec",
+            "Keywords",
+            "Keywords[pl]",
+            "StartupWMClass",
+            "Terminal",
+            "Actions",
+        ] {
+            assert_eq!(document.get_main(key), None);
+        }
+        assert_eq!(document.get_main("URL"), Some("https://example.org"));
+        assert_eq!(document.get_main("X-Vendor"), Some("keep"));
+        assert_eq!(
+            document.get_group_value("Vendor Group", "Key"),
+            Some("keep")
+        );
+        assert!(!document.serialize().contains("[Desktop Action Open]"));
+        document.set_main("Type", Some("Application"));
+        document.prune_type_specific_fields();
+        assert_eq!(document.get_main("URL"), None);
+        document.set_main("Type", Some("Directory"));
+        document.set_main("URL", Some("https://example.org"));
+        document.prune_type_specific_fields();
+        assert_eq!(document.get_main("URL"), None);
     }
 
     #[test]

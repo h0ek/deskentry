@@ -1,7 +1,8 @@
+use crate::fileio::open_regular;
 use crate::model::DesktopDocument;
 use crate::xdg;
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -194,7 +195,7 @@ fn has_desktop_extension(path: &Path) -> bool {
 }
 
 fn read_desktop_file(path: &Path) -> Option<String> {
-    let file = File::open(path).ok()?;
+    let file = open_regular(path, false).ok()?;
     let metadata = file.metadata().ok()?;
     if !metadata.is_file() || metadata.len() > MAX_DESKTOP_BYTES {
         return None;
@@ -210,7 +211,7 @@ fn read_desktop_file(path: &Path) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-fn desktop_file_id(relative: &Path) -> Option<String> {
+pub(crate) fn desktop_file_id(relative: &Path) -> Option<String> {
     relative
         .components()
         .map(|component| component.as_os_str().to_str())
@@ -228,6 +229,41 @@ mod tests {
             desktop_file_id(Path::new("vendor/foo.desktop")),
             Some("vendor-foo.desktop".to_string())
         );
+    }
+
+    #[test]
+    fn skips_fifo_symlinks_but_reads_regular_symlinks() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root =
+            std::env::temp_dir().join(format!("deskentry-scan-{}-{nanos}", std::process::id()));
+        fs::create_dir(&root).map_err(|error| error.to_string())?;
+        let fifo = root.join("fifo");
+        let status = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err("mkfifo failed".to_string());
+        }
+        let fifo_link = root.join("fifo.desktop");
+        symlink(&fifo, &fifo_link).map_err(|error| error.to_string())?;
+        let normal = root.join("regular");
+        let regular_link = root.join("regular.desktop");
+        fs::write(&normal, "[Desktop Entry]\nName=Test\n").map_err(|error| error.to_string())?;
+        symlink(&normal, &regular_link).map_err(|error| error.to_string())?;
+        assert!(read_desktop_file(&fifo_link).is_none());
+        assert_eq!(
+            read_desktop_file(&regular_link).as_deref(),
+            Some("[Desktop Entry]\nName=Test\n")
+        );
+        fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     #[test]

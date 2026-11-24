@@ -12,6 +12,7 @@
   <icon type="stock">io.github.h0ek.DeskEntry</icon>
   <url type="homepage">https://github.com/h0ek/deskentry</url>
   <releases>
+    <release version="1.0.1" date="2026-11-24"/>
     <release version="1.0.0" date="2026-07-27"/>
     <release version="0.5.0" date="2026-07-27"/>
     <release version="0.4.1" date="2026-07-27"/>

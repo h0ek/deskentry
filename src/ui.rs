@@ -3,7 +3,7 @@ use crate::model::{
     ActionLocalizedValue, DesktopAction, DesktopDocument, ExtraKeyValue, LocalizedValue,
 };
 use crate::scanner::{self, EntryGroup, SourceKind};
-use crate::storage;
+use crate::{storage, updates};
 use adw::prelude::*;
 use gtk::gio;
 use std::cell::RefCell;
@@ -52,6 +52,7 @@ struct EditorSnapshot {
 struct DirtySink {
     state: Weak<RefCell<AppState>>,
     indicator: gtk::Label,
+    status: gtk::Label,
     save: gtk::Button,
 }
 
@@ -363,6 +364,7 @@ pub fn build_ui(app: &adw::Application) {
 
     reload_entries(&state, &widgets, None);
     widgets.window.present();
+    check_startup_update(&widgets.window);
 }
 
 fn build_window(app: &adw::Application) -> AppWidgets {
@@ -933,6 +935,7 @@ fn install_dirty_sink(state: &Rc<RefCell<AppState>>, widgets: &EditorWidgets) {
     let sink = DirtySink {
         state: Rc::downgrade(state),
         indicator: widgets.dirty_indicator.clone(),
+        status: widgets.status.clone(),
         save: widgets.save.clone(),
     };
     *widgets.dirty_sink.borrow_mut() = Some(sink);
@@ -1007,6 +1010,8 @@ fn mark_dirty_sink(sink: &Rc<RefCell<Option<DirtySink>>>) {
     if state.borrow().baseline.is_none() {
         return;
     }
+    current.status.set_text("");
+    current.status.set_tooltip_text(None);
     current.indicator.set_text("Unsaved changes");
     current.indicator.set_visible(true);
     current.save.set_sensitive(true);
@@ -1200,16 +1205,109 @@ fn connect_toolbar(state: &Rc<RefCell<AppState>>, widgets: &AppWidgets) {
 }
 
 fn connect_about(widgets: &AppWidgets) {
-    let parent = widgets.window.clone();
-    widgets.about.clone().connect_clicked(move |_| {
-        let dialog = adw::AboutDialog::builder()
-            .application_name("DeskEntry")
-            .application_icon(crate::APP_ID)
-            .version(env!("CARGO_PKG_VERSION"))
-            .developer_name("hoek")
-            .website(env!("CARGO_PKG_REPOSITORY"))
+    let parent = widgets.window.downgrade();
+    widgets.about.connect_clicked(move |_| {
+        let Some(parent) = parent.upgrade() else {
+            return;
+        };
+        let dialog = adw::AlertDialog::builder()
+            .heading("DeskEntry")
+            .body(format!("Version {} · hoek", env!("CARGO_PKG_VERSION")))
             .build();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        let icon = gtk::Image::from_icon_name(crate::APP_ID);
+        icon.set_pixel_size(64);
+        let website = gtk::LinkButton::with_label(env!("CARGO_PKG_REPOSITORY"), "Project website");
+        let releases = gtk::LinkButton::with_label(updates::RELEASES_URL, "GitHub Releases");
+        let automatic = gtk::CheckButton::with_label("Check for updates on startup");
+        automatic.set_active(updates::enabled());
+        let check = gtk::Button::with_label("Check for Updates");
+        let status = gtk::Label::new(None);
+        status.set_wrap(true);
+        status.add_css_class("dim-label");
+        content.append(&icon);
+        content.append(&website);
+        content.append(&releases);
+        content.append(&automatic);
+        content.append(&check);
+        content.append(&status);
+        let preference_status = status.downgrade();
+        automatic.connect_toggled(move |button| {
+            if button.is_active() == updates::enabled() {
+                return;
+            }
+            if updates::set_enabled(button.is_active()).is_err() {
+                button.set_active(updates::enabled());
+                if let Some(status) = preference_status.upgrade() {
+                    status.set_text("Could not save update preference.");
+                }
+            }
+        });
+        let result_status = status.downgrade();
+        check.connect_clicked(move |button| {
+            let Some(status) = result_status.upgrade() else {
+                return;
+            };
+            button.set_sensitive(false);
+            status.set_text("Checking for updates…");
+            let button = button.downgrade();
+            let status = status.downgrade();
+            let _task = gtk::glib::MainContext::default().spawn_local(async move {
+                let result = gio::spawn_blocking(updates::check).await.ok().flatten();
+                if let Some(status) = status.upgrade() {
+                    let message = match result {
+                        Some(release) if release.newer => {
+                            format!("New version available: v{}", release.version)
+                        }
+                        Some(release) => {
+                            format!("No newer release. Latest: v{}", release.version)
+                        }
+                        None => "Could not check for updates. Check your connection or curl installation."
+                            .to_string(),
+                    };
+                    status.set_text(&message);
+                }
+                if let Some(button) = button.upgrade() {
+                    button.set_sensitive(true);
+                }
+            });
+        });
+        dialog.set_extra_child(Some(&content));
+        dialog.add_response("close", "OK");
+        dialog.set_close_response("close");
+        dialog.set_default_response(Some("close"));
         dialog.present(Some(&parent));
+    });
+}
+
+fn check_startup_update(window: &adw::ApplicationWindow) {
+    if !updates::should_check_at_startup() {
+        return;
+    }
+    let window = window.downgrade();
+    let _task = gtk::glib::MainContext::default().spawn_local(async move {
+        let Some(release) = gio::spawn_blocking(updates::check).await.ok().flatten() else {
+            return;
+        };
+        if release.newer
+            && let Some(window) = window.upgrade()
+            && gtk::prelude::WidgetExt::is_visible(&window)
+        {
+            let dialog = adw::AlertDialog::builder()
+                .heading("Update Available")
+                .body(format!(
+                    "DeskEntry v{} is available. You are using v{}.",
+                    release.version,
+                    env!("CARGO_PKG_VERSION")
+                ))
+                .build();
+            let link = gtk::LinkButton::with_label(updates::RELEASES_URL, "Open GitHub Releases");
+            dialog.set_extra_child(Some(&link));
+            dialog.add_response("close", "OK");
+            dialog.set_close_response("close");
+            dialog.set_default_response(Some("close"));
+            dialog.present(Some(&window));
+        }
     });
 }
 
@@ -1223,7 +1321,7 @@ fn connect_window_actions(
     let save_widgets = widgets.clone();
     save.connect_activate(move |_, _| {
         if let Err(error) = save_current_entry(&save_state, &save_widgets) {
-            set_status(&save_widgets.editor, &error);
+            show_editor_error(&save_widgets, "Save Failed", &error);
         }
     });
     widgets.window.add_action(&save);
@@ -1317,7 +1415,7 @@ fn confirm_unsaved_changes(
             Ok(1) => perform_pending_action(&state, &widgets, action),
             Ok(2) => match save_current_entry(&state, &widgets) {
                 Ok(()) => perform_pending_action(&state, &widgets, action),
-                Err(error) => set_status(&widgets.editor, &error),
+                Err(error) => show_editor_error(&widgets, "Save Failed", &error),
             },
             _ => {}
         },
@@ -1363,7 +1461,7 @@ fn connect_save(state: &Rc<RefCell<AppState>>, widgets: &AppWidgets) {
     let widgets = widgets.clone();
     widgets.editor.save.clone().connect_clicked(move |_| {
         if let Err(error) = save_current_entry(&state, &widgets) {
-            set_status(&widgets.editor, &error);
+            show_editor_error(&widgets, "Save Failed", &error);
         }
     });
 }
@@ -1391,7 +1489,21 @@ fn save_current_entry(state: &Rc<RefCell<AppState>>, widgets: &AppWidgets) -> Re
         );
     }
 
-    let result = storage::save_user_override(&id, &document.serialize())?;
+    let user_path = {
+        let borrowed = state.borrow();
+        if borrowed.persistence == EntryPersistence::Existing {
+            borrowed
+                .groups
+                .iter()
+                .find(|group| group.id == id)
+                .and_then(EntryGroup::effective)
+                .filter(|variant| variant.source == SourceKind::User)
+                .map(|variant| variant.path.clone())
+        } else {
+            None
+        }
+    };
+    let result = storage::save_user_override(&id, &document.serialize(), user_path.as_deref())?;
     update_state_after_save(state, &id, document, result.path);
     reload_entries(state, widgets, Some(&id));
     set_success_status(
@@ -1404,21 +1516,31 @@ fn save_current_entry(state: &Rc<RefCell<AppState>>, widgets: &AppWidgets) -> Re
 
 fn connect_validate(state: &Rc<RefCell<AppState>>, widgets: &AppWidgets) {
     let state = state.clone();
-    let editor = widgets.editor.clone();
+    let widgets = widgets.clone();
     widgets.editor.validate.clone().connect_clicked(move |_| {
         let Some(mut document) = state.borrow().document.clone() else {
-            set_status(&editor, "Select or create a desktop entry first");
+            set_status(&widgets.editor, "Select or create a desktop entry first");
             return;
         };
-        if let Err(error) = apply_widgets_to_document(&editor, &mut document) {
-            set_status(&editor, &error);
+        if let Err(error) = apply_widgets_to_document(&widgets.editor, &mut document) {
+            show_editor_error(&widgets, "Validation Failed", &error);
             return;
         }
         match storage::validate_contents(&document.serialize()) {
-            Ok(message) => set_status(&editor, &message),
-            Err(error) => set_status(&editor, &error),
+            Ok(message) => set_status(&widgets.editor, &message),
+            Err(error) => show_editor_error(&widgets, "Validation Failed", &error),
         }
     });
+}
+
+fn revert_selected_entry(state: &RefCell<AppState>, load: impl FnOnce(&str)) -> bool {
+    let selected_id = state.borrow().selected_id.clone();
+    if let Some(id) = selected_id {
+        load(&id);
+        true
+    } else {
+        false
+    }
 }
 
 fn connect_revert(state: &Rc<RefCell<AppState>>, widgets: &AppWidgets) {
@@ -1442,9 +1564,7 @@ fn connect_revert(state: &Rc<RefCell<AppState>>, widgets: &AppWidgets) {
             if !matches!(result, Ok(1)) {
                 return;
             }
-            if let Some(id) = state.borrow().selected_id.clone() {
-                load_entry(&state, &widgets, &id);
-            } else {
+            if !revert_selected_entry(&state, |id| load_entry(&state, &widgets, id)) {
                 let (document, baseline_id) = {
                     let borrowed = state.borrow();
                     (
@@ -1461,6 +1581,7 @@ fn connect_revert(state: &Rc<RefCell<AppState>>, widgets: &AppWidgets) {
                         widgets.editor.id.set_text(&baseline_id);
                     }
                     set_clean_baseline(&state, &widgets.editor);
+                    refresh_raw_preview(&state, &widgets.editor);
                 }
             }
             set_status(&widgets.editor, "Reverted unsaved changes");
@@ -1649,6 +1770,21 @@ fn connect_view_original(state: &Rc<RefCell<AppState>>, widgets: &AppWidgets) {
 }
 
 fn show_source_window(parent: &adw::ApplicationWindow, title: &str, contents: &str) {
+    show_text_window(parent, title, contents, gtk::WrapMode::None);
+}
+
+fn show_editor_error(widgets: &AppWidgets, title: &str, error: &str) {
+    set_status(&widgets.editor, title);
+    widgets.editor.status.set_tooltip_text(Some(error));
+    show_text_window(&widgets.window, title, error, gtk::WrapMode::WordChar);
+}
+
+fn show_text_window(
+    parent: &adw::ApplicationWindow,
+    title: &str,
+    contents: &str,
+    wrap_mode: gtk::WrapMode,
+) {
     let window = adw::Window::builder()
         .title(title)
         .default_width(760)
@@ -1662,7 +1798,11 @@ fn show_source_window(parent: &adw::ApplicationWindow, title: &str, contents: &s
     view.set_editable(false);
     view.set_cursor_visible(false);
     view.set_monospace(true);
-    view.set_wrap_mode(gtk::WrapMode::None);
+    view.set_wrap_mode(wrap_mode);
+    view.set_top_margin(12);
+    view.set_bottom_margin(12);
+    view.set_left_margin(12);
+    view.set_right_margin(12);
     view.buffer().set_text(contents);
     let scroll = gtk::ScrolledWindow::builder()
         .vexpand(true)
@@ -1687,12 +1827,20 @@ fn connect_icon_import(widgets: &AppWidgets) {
                 .modal(true)
                 .build();
             let editor = editor.clone();
+            let parent = window.clone();
             dialog.open(Some(&window), None::<&gio::Cancellable>, move |result| {
                 let Ok(file) = result else {
                     return;
                 };
                 let Some(path) = file.path() else {
-                    set_status(&editor, "Selected icon has no local filesystem path");
+                    let error = "Selected icon has no local filesystem path";
+                    set_status(&editor, error);
+                    show_text_window(
+                        &parent,
+                        "Icon Import Failed",
+                        error,
+                        gtk::WrapMode::WordChar,
+                    );
                     return;
                 };
                 match storage::import_icon(&path) {
@@ -1704,7 +1852,16 @@ fn connect_icon_import(widgets: &AppWidgets) {
                             result.warning.as_deref(),
                         );
                     }
-                    Err(error) => set_status(&editor, &error),
+                    Err(error) => {
+                        set_status(&editor, "Icon Import Failed");
+                        let message = format!("{}\n\n{error}", path.display());
+                        show_text_window(
+                            &parent,
+                            "Icon Import Failed",
+                            &message,
+                            gtk::WrapMode::WordChar,
+                        );
+                    }
                 }
             });
         });
@@ -2176,8 +2333,13 @@ fn apply_widgets_to_document(
     );
     set_optional_boolean(document, "SingleMainWindow", &widgets.single_main_window);
     document.replace_localized_values(&localized_values)?;
-    document.replace_desktop_actions(&collect_desktop_actions(widgets))?;
-    document.replace_extra_key_values(&collect_extra_values(widgets))?;
+    let actions = if matches!(widgets.entry_type.text().as_str(), "Link" | "Directory") {
+        Vec::new()
+    } else {
+        collect_desktop_actions(widgets)
+    };
+    document.replace_actions_and_extra(&actions, &collect_extra_values(widgets))?;
+    document.prune_type_specific_fields();
     Ok(())
 }
 
@@ -2977,17 +3139,139 @@ fn connect_icon_browser(widgets: &AppWidgets) {
         });
 }
 
-fn show_icon_browser(widgets: &AppWidgets) {
-    let display = gtk::prelude::WidgetExt::display(&widgets.window);
-    let theme = gtk::IconTheme::for_display(&display);
-    let mut names = theme
-        .icon_names()
-        .into_iter()
-        .map(|name| name.to_string())
-        .collect::<Vec<_>>();
-    names.sort_unstable();
-    names.dedup();
+fn icon_browser_factory() -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, object| {
+        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        content.set_margin_top(6);
+        content.set_margin_bottom(6);
+        content.set_margin_start(10);
+        content.set_margin_end(10);
+        let image = gtk::Image::new();
+        image.set_pixel_size(32);
+        let label = gtk::Label::new(None);
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        content.append(&image);
+        content.append(&label);
+        item.set_child(Some(&content));
+    });
+    factory.connect_bind(|_, object| {
+        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(name) = item.item().and_downcast::<gtk::StringObject>() else {
+            return;
+        };
+        let Some(content) = item.child().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        let name = name.string();
+        if let Some(image) = content.first_child().and_downcast::<gtk::Image>() {
+            image.set_icon_name(Some(name.as_str()));
+        }
+        if let Some(label) = content.last_child().and_downcast::<gtk::Label>() {
+            label.set_label(name.as_str());
+            label.set_tooltip_text(Some(name.as_str()));
+        }
+    });
+    factory
+}
 
+fn update_icon_browser_status(status: &gtk::Label, matches: u32) {
+    if matches == 0 {
+        status.set_label("No icons found");
+    } else {
+        status.set_label(&format!("{matches} icons"));
+    }
+}
+
+fn icon_browser_footer(
+    window: &adw::Window,
+    selection: &gtk::SingleSelection,
+    icon_entry: &gtk::Entry,
+) -> gtk::Box {
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    footer.set_margin_start(12);
+    footer.set_margin_end(12);
+    footer.set_margin_bottom(12);
+    let hint = gtk::Label::new(Some("Double-click an icon or select it and click Choose."));
+    hint.set_wrap(true);
+    hint.set_xalign(0.0);
+    hint.set_hexpand(true);
+    hint.add_css_class("dim-label");
+    let cancel = gtk::Button::with_label("Cancel");
+    let choose = gtk::Button::with_label("Choose");
+    choose.add_css_class("suggested-action");
+    choose.set_sensitive(selection.selected_item().is_some());
+    footer.append(&hint);
+    footer.append(&cancel);
+    footer.append(&choose);
+    let choose_button = choose.downgrade();
+    selection.connect_selected_item_notify(move |selection| {
+        if let Some(choose_button) = choose_button.upgrade() {
+            choose_button.set_sensitive(selection.selected_item().is_some());
+        }
+    });
+    let browser = window.downgrade();
+    cancel.connect_clicked(move |_| {
+        if let Some(browser) = browser.upgrade() {
+            browser.close();
+        }
+    });
+    let icon_entry = icon_entry.clone();
+    let browser = window.downgrade();
+    let selected_icon = selection.clone();
+    choose.connect_clicked(move |_| {
+        if let Some(name) = selected_icon
+            .selected_item()
+            .and_downcast::<gtk::StringObject>()
+            && let Some(browser) = browser.upgrade()
+        {
+            icon_entry.set_text(name.string().as_str());
+            browser.close();
+        }
+    });
+    footer
+}
+
+fn load_icon_browser_names(
+    window: &adw::Window,
+    names: gtk::StringList,
+    spinner: gtk::Spinner,
+    status: gtk::Label,
+    filtered: gtk::FilterListModel,
+) {
+    let browser = window.downgrade();
+    gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || {
+        let Some(browser) = browser
+            .upgrade()
+            .filter(gtk::prelude::WidgetExt::is_visible)
+        else {
+            return;
+        };
+        let display = gtk::prelude::WidgetExt::display(&browser);
+        let theme = gtk::IconTheme::for_display(&display);
+        let mut icon_names = theme
+            .icon_names()
+            .into_iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        icon_names.sort_unstable();
+        icon_names.dedup();
+        let values = icon_names.iter().map(String::as_str).collect::<Vec<_>>();
+        names.splice(0, 0, &values);
+        spinner.stop();
+        spinner.set_visible(false);
+        update_icon_browser_status(&status, filtered.n_items());
+    });
+}
+
+fn show_icon_browser(widgets: &AppWidgets) {
     let window = adw::Window::builder()
         .title("Choose Theme Icon")
         .default_width(620)
@@ -3004,28 +3288,33 @@ fn show_icon_browser(widgets: &AppWidgets) {
     search.set_margin_end(12);
     root.append(&search);
 
-    let list = gtk::ListBox::new();
-    list.set_selection_mode(gtk::SelectionMode::Single);
+    let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    status_row.set_margin_start(12);
+    status_row.set_margin_end(12);
+    let spinner = gtk::Spinner::new();
+    spinner.start();
+    let status = gtk::Label::new(Some("Loading theme icons…"));
+    status.add_css_class("dim-label");
+    status_row.append(&spinner);
+    status_row.append(&status);
+    root.append(&status_row);
+
+    let names = gtk::StringList::new(&[]);
+    let expression = gtk::PropertyExpression::new(
+        gtk::StringObject::static_type(),
+        None::<gtk::Expression>,
+        "string",
+    );
+    let filter = gtk::StringFilter::new(Some(expression));
+    filter.set_match_mode(gtk::StringFilterMatchMode::Substring);
+    filter.set_ignore_case(true);
+    let filtered = gtk::FilterListModel::new(Some(names.clone()), Some(filter.clone()));
+    let selection = gtk::SingleSelection::new(Some(filtered.clone()));
+    selection.set_autoselect(false);
+    selection.set_can_unselect(true);
+    let list = gtk::ListView::new(Some(selection.clone()), Some(icon_browser_factory()));
+    list.set_single_click_activate(false);
     list.add_css_class("boxed-list");
-    let rows = Rc::new(RefCell::new(Vec::<(gtk::ListBoxRow, String)>::new()));
-    for name in names {
-        let row = gtk::ListBoxRow::new();
-        let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        content.set_margin_top(6);
-        content.set_margin_bottom(6);
-        content.set_margin_start(10);
-        content.set_margin_end(10);
-        let image = gtk::Image::from_icon_name(&name);
-        image.set_pixel_size(32);
-        let label = gtk::Label::new(Some(&name));
-        label.set_xalign(0.0);
-        label.set_hexpand(true);
-        content.append(&image);
-        content.append(&label);
-        row.set_child(Some(&content));
-        list.append(&row);
-        rows.borrow_mut().push((row, name));
-    }
 
     let scroll = gtk::ScrolledWindow::builder()
         .vexpand(true)
@@ -3033,32 +3322,46 @@ fn show_icon_browser(widgets: &AppWidgets) {
         .child(&list)
         .build();
     root.append(&scroll);
+
+    root.append(&icon_browser_footer(
+        &window,
+        &selection,
+        &widgets.editor.icon,
+    ));
     window.set_content(Some(&root));
 
-    let filter_rows = rows.clone();
     search.connect_search_changed(move |entry| {
-        let query = entry.text().trim().to_lowercase();
-        for (row, name) in filter_rows.borrow().iter() {
-            row.set_visible(query.is_empty() || name.to_lowercase().contains(&query));
+        let text = entry.text();
+        let query = text.trim();
+        filter.set_search((!query.is_empty()).then_some(query));
+        selection.set_selected(gtk::INVALID_LIST_POSITION);
+    });
+
+    let result_status = status.clone();
+    let loading_spinner = spinner.clone();
+    filtered.connect_items_changed(move |model, _, _, _| {
+        if !loading_spinner.is_spinning() {
+            update_icon_browser_status(&result_status, model.n_items());
         }
     });
 
     let icon_entry = widgets.editor.icon.clone();
-    let activate_rows = rows.clone();
-    let browser = window.clone();
-    list.connect_row_activated(move |_, selected| {
-        let name = activate_rows
-            .borrow()
-            .iter()
-            .find(|(row, _)| row == selected)
-            .map(|(_, name)| name.clone());
-        if let Some(name) = name {
-            icon_entry.set_text(&name);
+    let browser = window.downgrade();
+    let activate_model = filtered.clone();
+    list.connect_activate(move |_, position| {
+        if let Some(name) = activate_model
+            .item(position)
+            .and_downcast::<gtk::StringObject>()
+            && let Some(browser) = browser.upgrade()
+        {
+            icon_entry.set_text(name.string().as_str());
             browser.close();
         }
     });
 
     window.present();
+    search.grab_focus();
+    load_icon_browser_names(&window, names, spinner, status, filtered);
 }
 
 fn set_editor_sensitive(widgets: &EditorWidgets, sensitive: bool) {
@@ -3177,12 +3480,25 @@ fn set_status(widgets: &EditorWidgets, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, EntryPersistence, SelectionSignal, source_matches_filter,
+        AppState, EntryPersistence, SelectionSignal, revert_selected_entry, source_matches_filter,
         take_suppressed_selection, type_matches_filter,
     };
     use crate::scanner::SourceKind;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[test]
+    fn revert_releases_selection_borrow_before_loading() {
+        let state = RefCell::new(AppState {
+            selected_id: Some("example.desktop".to_string()),
+            ..AppState::default()
+        });
+        assert!(revert_selected_entry(&state, |id| {
+            assert_eq!(id, "example.desktop");
+            state.borrow_mut().selected_id = None;
+        }));
+        assert!(!revert_selected_entry(&state, |_| {}));
+    }
 
     #[test]
     fn source_filters_group_flatpak_variants() {

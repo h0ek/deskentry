@@ -1,8 +1,10 @@
 mod comparison;
+mod fileio;
 mod model;
 mod scanner;
 mod storage;
 mod ui;
+mod updates;
 mod xdg;
 
 use adw::prelude::*;

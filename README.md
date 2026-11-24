@@ -18,12 +18,12 @@ DeskEntry is a GNOME-first manager for Linux `.desktop` files. It discovers desk
 - Search and filter entries by source and desktop entry type
 - Edit standard Desktop Entry fields, optional booleans and localized values
 - Create and edit Desktop Actions with localized names and icons
-- Browse icons from the active GTK icon theme and import SVG or compatible PNG icons into the user `hicolor` theme
+- Browse icons from the active GTK icon theme and import SVG or PNG icons into the user `hicolor` theme, detecting the format by content and resizing PNGs to supported dimensions with transparent padding when needed
 - Open external `.desktop` files and import them as user entries
 - Compare a user override with the current original system, Flatpak, Snap or XDG entry
 - View the original source and selectively apply individual original values to an override
 - Preview the resulting raw source and edit extra or vendor-specific keys
-- Adapt the editor to `Application`, `Link` and `Directory` entry types
+- Adapt the editor to `Application`, `Link` and `Directory` entry types (saving is limited to `.desktop` files of type `Application` or `Link`)
 - Preserve comments, unknown keys and unmanaged groups while editing
 - Create user overrides without modifying package-managed files
 - Reset overrides and safely delete user-owned entries with confirmation
@@ -31,8 +31,8 @@ DeskEntry is a GNOME-first manager for Linux `.desktop` files. It discovers desk
 - Use atomic writes and backups for user entries
 - Protect unsaved changes when switching entries, reloading, opening files or closing the application
 - Launch entries and open their file location
-- Show application information, version, author and project link in the About dialog
-- Work locally without network access, telemetry or privileged writes
+- Show application information and check for new releases manually or optionally at startup
+- Work locally without network access, telemetry or privileged writes; update checks contact GitHub only when requested or enabled
 
 ## Usage
 
@@ -74,9 +74,11 @@ Requirements:
 
 - Rust 1.94.1 or newer
 - GTK 4.10 or newer
+- GdkPixbuf with PNG and SVG image loaders for icon imports
 - libadwaita 1.5 or newer
 - `desktop-file-utils`
 - `glib-compile-resources`
+- `curl` (optional, for update checks)
 
 On Fedora:
 

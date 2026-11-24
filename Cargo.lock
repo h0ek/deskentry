@@ -49,12 +49,13 @@ dependencies = [
 
 [[package]]
 name = "deskentry"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "gio-unix",
  "glib-build-tools",
  "gtk4",
  "libadwaita",
+ "libc",
 ]
 
 [[package]]
